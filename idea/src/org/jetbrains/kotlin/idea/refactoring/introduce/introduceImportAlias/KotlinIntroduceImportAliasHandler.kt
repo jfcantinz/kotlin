@@ -40,6 +40,8 @@ import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.psi.*
 import org.jetbrains.kotlin.psi.psiUtil.getQualifiedElement
+import org.jetbrains.kotlin.psi.psiUtil.getQualifiedElementSelector
+import org.jetbrains.kotlin.psi.psiUtil.isExtensionDeclaration
 import org.jetbrains.kotlin.psi.psiUtil.siblings
 import org.jetbrains.kotlin.resolve.PropertyImportedFromObject
 import org.jetbrains.kotlin.resolve.scopes.LexicalScope
@@ -63,7 +65,7 @@ object KotlinIntroduceImportAliasHandler : RefactoringActionHandler {
             .flatMap { findPsiElements(project, file, it) }
             .flatMap {
                 ReferencesSearch.search(it, file.useScope).findAll() as List<KtSimpleNameReference>
-            }
+            }.map { UsageContext(it, isExtension = it.resolve()?.isExtensionDeclaration() == true) }
 
         val suggestedName = suggestedName(element.mainReference.value, file.getResolutionScope())
         ImportInsertHelperImpl.addImport(project, file, fqName, false, Name.identifier(suggestedName))
@@ -86,6 +88,8 @@ object KotlinIntroduceImportAliasHandler : RefactoringActionHandler {
         throw AssertionError("${KotlinIntroduceImportAliasHandler.REFACTORING_NAME} can only be invoked from editor")
     }
 }
+
+private data class UsageContext(val reference: KtSimpleNameReference, val isExtension: Boolean)
 
 private fun cleanImport(file: KtFile, fqName: FqName) {
     file.importDirectives.find { it.alias == null && fqName == it.importedFqName }?.delete()
@@ -125,11 +129,16 @@ private fun invokeRename(project: Project, editor: Editor, file: KtFile) {
     KotlinRenameDispatcherHandler().invoke(project, editor, file, dataContext)
 }
 
-private fun replaceUsages(usages: List<KtSimpleNameReference>, newName: String) {
-    usages.filter { !it.isImportUsage() }
+private fun replaceUsages(usages: List<UsageContext>, newName: String) {
+    usages.filter { !it.reference.isImportUsage() }
         .reversed() // case: inner element
-        .map {
-            val newExpression = it.handleElementRename(newName) as KtNameReferenceExpression
+        .forEach {
+            val newExpression = it.reference.handleElementRename(newName) as KtNameReferenceExpression
+            if (it.isExtension) {
+                newExpression.getQualifiedElementSelector()?.replace(newExpression)
+                return@forEach
+            }
+
             val qualifiedElement = newExpression.getQualifiedElement()
             if (qualifiedElement != newExpression) {
                 val parent = newExpression.parent
